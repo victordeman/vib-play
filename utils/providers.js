@@ -100,8 +100,8 @@ export const PROVIDERS = {
         maxTokens: 131072,
         supportsStreaming: true,
         description: "AI with real-time web search capabilities"
-    } // <-- ADD THIS BRACE!
-};
+    } // <-- This was missing
+}; // <-- ADD THIS SEMICOLON!
 
 // Helper function to get model display name
 export const getModelDisplayName = (providerId, modelId) => {
