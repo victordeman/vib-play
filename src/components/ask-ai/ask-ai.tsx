@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { toast } from "react-toastify";
 import { v4 as uuidv4 } from 'uuid';
+import JSZip from 'jszip';
+import { saveAs } from 'file-saver';
 
 // Icons (you can replace these with your preferred icon library)
 const SendIcon = () => (
@@ -31,6 +33,12 @@ const PreviewIcon = () => (
   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+  </svg>
+);
+
+const DownloadIcon = () => (
+  <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
   </svg>
 );
 
@@ -73,7 +81,16 @@ const PROVIDER_OPTIONS = [
   { value: 'groq', label: 'Groq', description: 'Ultra-fast inference' },
   { value: 'perplexity', label: 'Perplexity', description: 'Web-connected AI' },
   { value: 'anthropic', label: 'Anthropic', description: 'Claude models' },
-  { value: 'cohere', label: 'Cohere', description: 'Enterprise language models' }
+  { value: 'cohere', label: 'Cohere', description: 'Enterprise language models' },
+  { value: 'gemini', label: 'Google Gemini', description: 'Gemini Pro/Flash models' }
+];
+
+const STACK_OPTIONS = [
+  { value: 'Next.js (fullstack)', label: 'Next.js (Fullstack)' },
+  { value: 'React + Express', label: 'React + Express' },
+  { value: 'React + Flask (Python)', label: 'React + Flask (Python)' },
+  { value: 'SvelteKit', label: 'SvelteKit' },
+  { value: 'Vue + Node.js', label: 'Vue + Node.js' }
 ];
 
 const AskAI: React.FC<AskAIProps> = ({
@@ -92,6 +109,7 @@ const AskAI: React.FC<AskAIProps> = ({
   const [showHistory, setShowHistory] = useState(false);
   const [sessionId, setSessionId] = useState<string>("");
   const [selectedProvider, setSelectedProvider] = useState(modelParams?.provider || 'openai');
+  const [selectedStack, setSelectedStack] = useState('React + Express');
   const [availableProviders, setAvailableProviders] = useState<string[]>([]);
   const [progress, setProgress] = useState(0);
   
@@ -230,6 +248,7 @@ const AskAI: React.FC<AskAIProps> = ({
         prompt: currentPrompt,
         provider: selectedProvider,
         sessionId: sessionId,
+        stack: selectedStack,
         ...(selectedTemplateId && { templateId: selectedTemplateId }),
         ...(modelParams?.model && { model: modelParams.model }),
         ...(modelParams?.maxTokens && { maxTokens: modelParams.maxTokens }),
@@ -328,17 +347,75 @@ const AskAI: React.FC<AskAIProps> = ({
     }
   };
 
+  // ZIP Export function
+  const downloadAsZip = async (content: string) => {
+    const zip = new JSZip();
+    
+    // Pattern to match: # /path/to/file.ext followed by code block
+    const filePattern = /#\s+([^\n\r]+)[\r\n]+```[^\n\r]*[\r\n]+([\s\S]*?)```/g;
+    let match;
+    let fileCount = 0;
+
+    while ((match = filePattern.exec(content)) !== null) {
+      const filePath = match[1].trim().replace(/^\//, ''); // remove leading slash
+      const fileContent = match[2].trim();
+      zip.file(filePath, fileContent);
+      fileCount++;
+    }
+
+    if (fileCount === 0) {
+      toast.error("No project files found in the response to export.");
+      return;
+    }
+
+    try {
+      const blob = await zip.generateAsync({ type: 'blob' });
+      saveAs(blob, `project-${Date.now()}.zip`);
+      toast.success(`Exported ${fileCount} files as ZIP`);
+    } catch (error) {
+      console.error('ZIP generation failed:', error);
+      toast.error("Failed to generate ZIP file");
+    }
+  };
+
   // Format message content
-  const formatMessageContent = (content: string, role: string) => {
-    if (role === 'assistant' && (content.includes('<!DOCTYPE html>') || content.includes('<html'))) {
-      return (
-        <div>
-          <div className="text-sm font-medium text-gray-600 mb-2">Generated HTML Content</div>
-          <div className="text-xs text-gray-500 bg-gray-100 p-2 rounded max-h-20 overflow-y-auto">
-            {content.substring(0, 200)}...
+  const formatMessageContent = (message: ChatMessage) => {
+    const { content, role } = message;
+    
+    if (role === 'assistant') {
+      const hasProjectFiles = content.includes('# /') && content.includes('```');
+      const isHtml = content.includes('<!DOCTYPE html>') || content.includes('<html');
+
+      if (isHtml) {
+        return (
+          <div>
+            <div className="text-sm font-medium text-gray-600 mb-2">Generated HTML Content</div>
+            <div className="text-xs text-gray-500 bg-gray-100 p-2 rounded max-h-20 overflow-y-auto">
+              {content.substring(0, 200)}...
+            </div>
           </div>
-        </div>
-      );
+        );
+      }
+
+      if (hasProjectFiles) {
+        return (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-gray-600">Full Project Generated</span>
+              <button
+                onClick={() => downloadAsZip(content)}
+                className="flex items-center px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors"
+              >
+                <DownloadIcon />
+                Download as Full Project ZIP
+              </button>
+            </div>
+            <div className="text-xs text-gray-500 bg-gray-100 p-2 rounded max-h-40 overflow-y-auto whitespace-pre-wrap font-mono">
+              {content.substring(0, 500)}...
+            </div>
+          </div>
+        );
+      }
     }
     
     return (
@@ -370,6 +447,20 @@ const AskAI: React.FC<AskAIProps> = ({
                       {option.label}
                     </option>
                   ))}
+              </select>
+
+              <label className="text-sm text-gray-600 ml-4">Stack:</label>
+              <select
+                value={selectedStack}
+                onChange={(e) => setSelectedStack(e.target.value)}
+                disabled={isAiWorking}
+                className="text-sm px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {STACK_OPTIONS.map(option => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
             </div>
           )}
@@ -443,7 +534,7 @@ const AskAI: React.FC<AskAIProps> = ({
                         : 'bg-white text-gray-800 border border-gray-200'
                     }`}
                   >
-                    {formatMessageContent(message.content, message.role)}
+                    {formatMessageContent(message)}
                     
                     <div className={`text-xs mt-2 ${
                       message.role === 'user' ? 'text-blue-100' : 'text-gray-500'
