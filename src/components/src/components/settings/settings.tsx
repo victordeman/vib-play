@@ -1,6 +1,5 @@
 /*  src/components/settings/settings.tsx  */
 import { useEffect, useState } from "react";
-import { PROVIDERS } from "../../../utils/providers.js";
 import classNames from "classnames";
 import { MdSettings } from "react-icons/md";
 import { useModelStore } from "../../store/modelStore";
@@ -64,37 +63,38 @@ function Settings({
   });
 
   /* ----- template categories ----- */
-  const [categories, setCategories] = {
-    id: "framework",
-    name: "Framework",
-    templates: [],
-  },
-  {
-    id: "ui",
-    name: "UI Library",
-    templates: [],
-  },
-  {
-    id: "tools",
-    name: "Tool Libraries",
-    templates: [],
-  },
+  const [categories, setCategories] = useState<TemplateCategory[]>([
+    {
+      id: "framework",
+      name: "Framework",
+      templates: [],
+    },
+    {
+      id: "ui",
+      name: "UI Library",
+      templates: [],
+    },
+    {
+      id: "tools",
+      name: "Tool Libraries",
+      templates: [],
+    },
   ]);
 
   /* ----- user selections ----- */
   const [selected, setSelected] = useState<SelectedTemplates>({
-    framework: null,
-    ui: null,
-    tools: [],
+    framework: selectedTemplate || null,
+    ui: selectedUI || null,
+    tools: selectedTools || [],
   });
 
   /* ----- model parameters ----- */
   const [params, setParams] = useState<ModelParameters>({
-    max_tokens: 64000,
-    temperature: 0,
-    api_key: "",
-    base_url: "",
-    model: "",
+    max_tokens: modelParams?.max_tokens || 64000,
+    temperature: modelParams?.temperature || 0.7,
+    api_key: modelParams?.api_key || "",
+    base_url: modelParams?.base_url || "",
+    model: modelParams?.model || "",
   });
 
   /* ----- static tool list ----- */
@@ -109,11 +109,6 @@ function Settings({
   ];
 
   /* ------------------- Handlers ------------------- */
-  const [selected, setSelected] = useState<SelectedTemplates>({
-    framework: null,
-    ui: null,
-    tools: [],
-  });
 
   /* ----- framework / UI single select ----- */
   const handleSingleSelect = (type: "framework" | "ui", id: string) => {
@@ -147,7 +142,6 @@ function Settings({
         ? prev.tools.filter((t) => t !== id)
         : [...prev.tools, id],
     }));
- 0.7; // <-- keep temperature default
   };
 
   /* ----- model param change ----- */
@@ -174,9 +168,7 @@ function Settings({
       model: params.model,
     };
     // omit empty values that are already provided by envConfig
-    if (!payload.api_key && envConfig.apiKey) delete payload.api_key;
-    if (!payload.base_url && envConfig.baseUrl) delete payload.base_url;
-    if (!payload.model && envConfig.model) delete payload.model;
+    // (Note: server side handles checking both payload and process.env)
 
     setTestStatus({ loading: true, tested: false, success: false, message: "" });
 
@@ -184,7 +176,10 @@ function Settings({
       const res = await fetch("/api/test-connection", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+            provider: 'openai', // Default to openai for testing connection in this UI
+            model: params.model
+        }),
       });
       const data = await res.json();
 
@@ -223,7 +218,7 @@ function Settings({
           const data = await res.json();
           if (data.ok && data.templates) {
             const framework = data.templates.filter((t: Template) =>
-              ["vanilla", "vue: "vue3"].includes(t.id)
+              ["vanilla", "vue3"].includes(t.id)
             );
             const ui = data.templates.filter((t: Template) =>
               ["elementPlus", "naiveUI"].includes(t.id)
@@ -233,11 +228,6 @@ function Settings({
               { id: "ui", name: "UI Library", templates: ui },
               { id: "tools", name: "Tool Libraries", templates: [] },
             ]);
-            setSelected({
-              framework: selectedTemplate,
-              ui: selectedUI,
-              tools: selectedTools ?? [],
-            });
           }
         }
       } catch (e) {
@@ -250,7 +240,14 @@ function Settings({
     if (open) {
       fetchTemplates();
       fetchModelInfo(); // refresh env config
-      if (modelParams) setParams(modelParams);
+      if (modelParams) {
+          setParams(modelParams);
+          setSelected({
+            framework: selectedTemplate,
+            ui: selectedUI,
+            tools: selectedTools ?? [],
+          });
+      }
     }
   }, [
     open,
@@ -293,7 +290,7 @@ function Settings({
           <header className="flex items-center justify-between p-4 border-b bg-gray-50">
             <h2 className="text-lg font-semibold">Settings</h2>
             <button
-              onClose(false)} className="text-gray-500 hover:text-gray-800">
+              onClick={() => onClose(false)} className="text-gray-500 hover:text-gray-800">
               ✕
             </button>
           </header>
@@ -357,6 +354,8 @@ function Settings({
                           <p className="text-xs text-gray-500">{t.description}</p>
                         </div>
                       </label>
+                    ))}
+                  </div>
                 </section>
 
                 {/* UI library (only for Vue3) */}
@@ -529,7 +528,9 @@ function Settings({
                           testStatus.success || envConfig.model
                             ? "bg-green-500"
                             : "bg-red-500"
-                        {testStatus.success ? "Verified" : envConfig.model ? "Configured" : "Not set"}
+                        )}
+                      />
+                      {testStatus.success ? "Verified" : envConfig.model ? "Configured" : "Not set"}
                     </span>
                   </label>
                   <input
