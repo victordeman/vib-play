@@ -6,6 +6,7 @@ import cookieParser from "cookie-parser";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
 import { createClient } from '@supabase/supabase-js';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // Load environment variables first
 dotenv.config();
@@ -13,6 +14,7 @@ dotenv.config();
 // Import utilities
 import { PROVIDERS } from "./utils/providers.js";
 import { TEMPLATES } from "./utils/templates.js";
+import { GeminiProvider } from "./utils/providers/gemini.js";
 
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
@@ -157,6 +159,25 @@ async function getChatHistory(sessionId) {
     }
 }
 
+const FULL_STACK_SYSTEM_PROMPT = `You are an expert full-stack developer.
+Always generate a complete, production-ready full-stack application based on the requested tech stack.
+The output MUST follow this specific format for each file:
+
+# /path/to/file.ext
+\`\`\`extension
+file content here
+\`\`\`
+
+You must include:
+1. /frontend (React/Next.js/etc. with Tailwind CSS)
+2. /backend (Node.js/Express/Flask/etc.)
+3. Database schema (prisma/schema.prisma or SQLite/SQL)
+4. Full package.json files for both frontend and backend
+5. Dockerfile and docker-compose.yml
+6. A detailed README.md with setup and run commands.
+
+Focus on clean, modular code and follow best practices for the chosen stack.`;
+
 // API Routes
 
 // Health check endpoint
@@ -225,6 +246,18 @@ app.post("/api/test-connection", async (req, res) => {
     const testModel = model || process.env[providerConfig.modelEnv] || providerConfig.defaultModel;
 
     try {
+        if (provider === 'gemini') {
+            const gemini = new GeminiProvider(apiKey);
+            const result = await gemini.generateResponse(testModel, [{ role: 'user', content: 'Ping' }], { maxTokens: 10 });
+            return res.json({
+                ok: true,
+                message: "Connection successful",
+                provider: providerConfig.name,
+                model: testModel,
+                response: result.text
+            });
+        }
+
         const response = await fetch(`${providerConfig.baseUrl}/chat/completions`, {
             method: "POST",
             headers: {
@@ -278,6 +311,7 @@ app.post("/api/ask-ai", async (req, res) => {
         model: requestedModel,
         sessionId, 
         templateId,
+        stack,
         maxTokens,
         temperature 
     } = req.body;
@@ -321,13 +355,15 @@ app.post("/api/ask-ai", async (req, res) => {
             }));
         }
 
-        // Add system prompt if template specified
-        if (templateId && TEMPLATES[templateId]?.systemPrompt) {
-            messages.unshift({
-                role: "system",
-                content: TEMPLATES[templateId].systemPrompt
-            });
-        }
+        // Add system prompt
+        const systemPrompt = templateId && TEMPLATES[templateId]?.systemPrompt
+            ? `${TEMPLATES[templateId].systemPrompt}\n\n${FULL_STACK_SYSTEM_PROMPT}`
+            : FULL_STACK_SYSTEM_PROMPT;
+
+        messages.unshift({
+            role: "system",
+            content: stack ? `Project Stack: ${stack}\n\n${systemPrompt}` : systemPrompt
+        });
 
         // Add current user message
         messages.push({ role: "user", content: prompt });
@@ -357,35 +393,49 @@ app.post("/api/ask-ai", async (req, res) => {
             try {
                 console.log(`Trying ${providerConfig.name} with model ${modelToUse}`);
 
-                const response = await fetch(`${providerConfig.baseUrl}/chat/completions`, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "Authorization": `Bearer ${apiKey}`,
-                        ...(providerKey === 'openrouter' && { 
-                            "HTTP-Referer": process.env.SITE_URL || "https://localhost:3000",
-                            "X-Title": "DeepSite 2.0"
-                        })
-                    },
-                    body: JSON.stringify({
-                        model: modelToUse,
-                        messages: messages,
-                        max_tokens: maxTokens || DEFAULT_MAX_TOKENS,
+                let aiResponse = '';
+                let tokensUsed = 0;
+
+                if (providerKey === 'gemini') {
+                    const gemini = new GeminiProvider(apiKey);
+                    const result = await gemini.generateResponse(modelToUse, messages, {
+                        maxTokens: maxTokens || DEFAULT_MAX_TOKENS,
                         temperature: temperature !== undefined ? temperature : DEFAULT_TEMPERATURE,
-                        ...(providerKey === 'openrouter' && { top_p: 1, frequency_penalty: 0, presence_penalty: 0 })
-                    }),
-                    timeout: 60000
-                });
+                    });
+                    aiResponse = result.text;
+                    tokensUsed = result.usage.total_tokens;
+                } else {
+                    const response = await fetch(`${providerConfig.baseUrl}/chat/completions`, {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Authorization": `Bearer ${apiKey}`,
+                            ...(providerKey === 'openrouter' && {
+                                "HTTP-Referer": process.env.SITE_URL || "https://localhost:3000",
+                                "X-Title": "DeepSite 2.0"
+                            })
+                        },
+                        body: JSON.stringify({
+                            model: modelToUse,
+                            messages: messages,
+                            max_tokens: maxTokens || DEFAULT_MAX_TOKENS,
+                            temperature: temperature !== undefined ? temperature : DEFAULT_TEMPERATURE,
+                            ...(providerKey === 'openrouter' && { top_p: 1, frequency_penalty: 0, presence_penalty: 0 })
+                        }),
+                        timeout: 120000 // Increased timeout for full-stack generation
+                    });
 
-                if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({}));
-                    lastError = `${providerConfig.name}: ${errorData.error?.message || response.statusText}`;
-                    console.log(`Failed with ${providerConfig.name}:`, lastError);
-                    continue;
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({}));
+                        lastError = `${providerConfig.name}: ${errorData.error?.message || response.statusText}`;
+                        console.log(`Failed with ${providerConfig.name}:`, lastError);
+                        continue;
+                    }
+
+                    const data = await response.json();
+                    aiResponse = data.choices?.[0]?.message?.content;
+                    tokensUsed = data.usage?.total_tokens || 0;
                 }
-
-                const data = await response.json();
-                const aiResponse = data.choices?.[0]?.message?.content;
 
                 if (!aiResponse?.trim()) {
                     lastError = `${providerConfig.name}: Empty response received`;
@@ -408,7 +458,7 @@ app.post("/api/ask-ai", async (req, res) => {
                     response: aiResponse,
                     modelUsed: modelToUse,
                     providerUsed: providerConfig.name,
-                    tokensUsed: data.usage?.total_tokens || 0
+                    tokensUsed: tokensUsed
                 });
 
             } catch (error) {

@@ -100,8 +100,23 @@ export const PROVIDERS = {
         maxTokens: 131072,
         supportsStreaming: true,
         description: "AI with real-time web search capabilities"
-    } // <-- This was missing
-}; // <-- ADD THIS SEMICOLON!
+    },
+
+    gemini: {
+        name: "Google Gemini",
+        apiKeyEnv: "GEMINI_API_KEY",
+        modelEnv: "GEMINI_MODEL",
+        defaultModel: "gemini-1.5-pro",
+        models: [
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash-exp"
+        ],
+        maxTokens: 30000,
+        supportsStreaming: false,
+        description: "Google's latest AI models"
+    }
+};
 
 // Helper function to get model display name
 export const getModelDisplayName = (providerId, modelId) => {
