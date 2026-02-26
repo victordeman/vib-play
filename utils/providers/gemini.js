@@ -24,6 +24,7 @@ export class GeminiProvider {
       topP: 0.95,
       topK: 40,
       maxOutputTokens: options.maxTokens ?? 8192,
+      ...(options.json && { response_mime_type: "application/json" })
     };
 
     const safetySettings = [

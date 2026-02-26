@@ -18,6 +18,7 @@ import Tabs from "./tabs/tabs";
 import AskAI from "./ask-ai/ask-ai";
 import Preview from "./preview/preview";
 import Settings from "./settings/settings";
+import FileTree from "./file-tree/file-tree";
 import { ModelParameters } from "./settings/settings";
 import { useModelStore } from "../store/modelStore";
 
@@ -38,6 +39,9 @@ function App() {
   const [selectedUI, setSelectedUI] = useState<string | null>(null);
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [modelParams, setModelParams] = useState<ModelParameters | undefined>();
+  const [projectData, setProjectData] = useState<any>(null);
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+  const [currentLanguage, setCurrentLanguage] = useState("html");
   
   // 使用全局状态获取模型信息
   const { currentModel, setCurrentModel, fetchModelInfo } = useModelStore();
@@ -285,10 +289,24 @@ function App() {
   // 自动保存 HTML 内容到本地存储（后台静默保存，无需用户操作）
   useEffect(() => {
     // 只有当 HTML 内容变化且不是默认内容时才保存
-    if (html !== defaultHTML) {
+    if (html !== defaultHTML && !projectData) {
       localStorage.setItem("html_content", html);
     }
-  }, [html]);
+  }, [html, projectData]);
+
+  const handleFileSelect = (path: string, content: string) => {
+    setActiveFilePath(path);
+    setHtml(content);
+
+    // Determine language based on path
+    if (path.endsWith(".tsx") || path.endsWith(".ts")) setCurrentLanguage("typescript");
+    else if (path.endsWith(".js") || path.endsWith(".jsx")) setCurrentLanguage("javascript");
+    else if (path.endsWith(".css")) setCurrentLanguage("css");
+    else if (path.endsWith(".json")) setCurrentLanguage("json");
+    else if (path.endsWith(".html")) setCurrentLanguage("html");
+    else if (path.endsWith(".md")) setCurrentLanguage("markdown");
+    else setCurrentLanguage("plaintext");
+  };
 
   return (
     <div className="h-screen bg-gray-950 font-sans overflow-hidden">
@@ -320,66 +338,112 @@ function App() {
           onModelParamsChange={handleModelParamsChange}
         />
       </Header>
-      <main className="max-lg:flex-col flex w-full">
+      <main className="max-lg:flex-col flex w-full overflow-hidden">
         <div
           ref={editor}
           className={classNames(
-            "w-full h-[calc(100dvh-49px)] lg:h-[calc(100dvh-54px)] relative overflow-hidden max-lg:transition-all max-lg:duration-200 select-none",
+            "w-full h-[calc(100dvh-49px)] lg:h-[calc(100dvh-54px)] relative overflow-hidden max-lg:transition-all max-lg:duration-200 select-none flex",
             {
               "max-lg:h-0": currentView === "preview",
             }
           )}
         >
-          <Tabs />
-          <div
-            onClick={(e) => {
-              if (isAiWorking) {
-                e.preventDefault();
-                e.stopPropagation();
-                toast.warn(t("askAI.working"));
-              }
-            }}
-          >
-            <Editor
-              language="html"
-              theme="vs-dark"
-              className={classNames(
-                "h-[calc(100dvh-90px)] lg:h-[calc(100dvh-96px)]",
-                {
-                  "pointer-events-none": isAiWorking,
+          {projectData && (
+            <FileTree
+              projectData={projectData}
+              onFileSelect={handleFileSelect}
+              activeFile={activeFilePath || ""}
+            />
+          )}
+          <div className="flex-1 flex flex-col min-w-0">
+            <Tabs />
+            <div
+                className="flex-1"
+                onClick={(e) => {
+                if (isAiWorking) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    toast.warn(t("askAI.working"));
                 }
-              )}
-              value={html}
-              onValidate={(markers) => {
-                if (markers?.length > 0) {
-                  // todo
-                }
-              }}
-              onChange={(value) => {
-                const newValue = value ?? "";
-                setHtml(newValue);
-              }}
-              onMount={(editor) => (editorRef.current = editor)}
+                }}
+            >
+                <Editor
+                language={currentLanguage}
+                theme="vs-dark"
+                className={classNames(
+                    "h-[calc(100dvh-90px)] lg:h-[calc(100dvh-96px)]",
+                    {
+                    "pointer-events-none": isAiWorking,
+                    }
+                )}
+                value={html}
+                onValidate={(markers) => {
+                    if (markers?.length > 0) {
+                    // todo
+                    }
+                }}
+                onChange={(value) => {
+                    const newValue = value ?? "";
+                    setHtml(newValue);
+
+                    // Update projectData if a file is active
+                    if (projectData && activeFilePath) {
+                        setProjectData((prev: any) => {
+                            const newProjectData = { ...prev };
+                            if (activeFilePath.startsWith("frontend/")) {
+                                const path = activeFilePath.replace("frontend/", "");
+                                newProjectData.frontend = {
+                                    ...newProjectData.frontend,
+                                    files: { ...newProjectData.frontend.files, [path]: newValue }
+                                };
+                            } else if (activeFilePath.startsWith("backend/")) {
+                                const path = activeFilePath.replace("backend/", "");
+                                newProjectData.backend = {
+                                    ...newProjectData.backend,
+                                    files: { ...newProjectData.backend.files, [path]: newValue }
+                                };
+                            } else {
+                                newProjectData.rootFiles = {
+                                    ...newProjectData.rootFiles,
+                                    [activeFilePath]: newValue
+                                };
+                            }
+                            return newProjectData;
+                        });
+                    }
+                }}
+                onMount={(editor) => (editorRef.current = editor)}
+                />
+            </div>
+            <AskAI
+                html={html}
+                setHtml={setHtml}
+                isAiWorking={isAiWorking}
+                setisAiWorking={setisAiWorking}
+                setView={setCurrentView}
+                selectedTemplateId={selectedTemplateId}
+                selectedUI={selectedUI}
+                selectedTools={selectedTools}
+                onTemplateChange={handleTemplateChange}
+                onScrollToBottom={() => {
+                editorRef.current?.revealLine(
+                    editorRef.current?.getModel()?.getLineCount() ?? 0
+                );
+                }}
+                modelParams={modelParams}
+                onModelParamsChange={handleModelParamsChange}
+                onProjectGenerated={(project) => {
+                    setProjectData(project);
+                    // Automatically select the first file or README
+                    if (project.rootFiles && project.rootFiles["README.md"]) {
+                        handleFileSelect("README.md", project.rootFiles["README.md"]);
+                    } else if (project.frontend?.files) {
+                        const firstFile = Object.keys(project.frontend.files)[0];
+                        handleFileSelect(`frontend/${firstFile}`, project.frontend.files[firstFile]);
+                    }
+                }}
             />
           </div>
-          <AskAI
-            html={html}
-            setHtml={setHtml}
-            isAiWorking={isAiWorking}
-            setisAiWorking={setisAiWorking}
-            setView={setCurrentView}
-            selectedTemplateId={selectedTemplateId}
-            selectedUI={selectedUI}
-            selectedTools={selectedTools}
-            onTemplateChange={handleTemplateChange}
-            onScrollToBottom={() => {
-              editorRef.current?.revealLine(
-                editorRef.current?.getModel()?.getLineCount() ?? 0
-              );
-            }}
-            modelParams={modelParams}
-            onModelParamsChange={handleModelParamsChange}
-          />
         </div>
         <div
           ref={resizer}
@@ -392,6 +456,7 @@ function App() {
           ref={preview}
           setView={setCurrentView}
           setHtml={setHtml}
+          projectData={projectData}
         />
       </main>
     </div>

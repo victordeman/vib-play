@@ -13,6 +13,7 @@ function Preview({
   setView,
   setHtml,
   ref,
+  projectData,
 }: {
   html: string;
   isResizing: boolean;
@@ -20,6 +21,7 @@ function Preview({
   setView: React.Dispatch<React.SetStateAction<"editor" | "preview">>;
   setHtml?: (html: string) => void;
   ref: React.RefObject<HTMLDivElement | null>;
+  projectData?: any;
 }) {
   const { t } = useTranslation();
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -56,8 +58,40 @@ function Preview({
     const throttleTime = isAiWorking ? 2000 : 1000;
     
     const now = Date.now();
+
+    // Inject mock script if projectData is present
+    let finalHtml = html;
+    if (projectData) {
+        const mockScript = `
+        <script>
+        (function() {
+            const originalFetch = window.fetch;
+            window.fetch = async (url, options) => {
+                console.log('Intercepted fetch:', url, options);
+                if (typeof url === 'string' && (url.startsWith('/api') || url.startsWith('http'))) {
+                    // Simple mock response based on common patterns
+                    const mockResponse = {
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ message: "Mock response for " + url, data: [] }),
+                        text: async () => "Mock response for " + url
+                    };
+                    return mockResponse;
+                }
+                return originalFetch(url, options);
+            };
+        })();
+        </script>
+        `;
+        if (html.includes('</head>')) {
+            finalHtml = html.replace('</head>', mockScript + '</head>');
+        } else {
+            finalHtml = mockScript + html;
+        }
+    }
+
     if (now - lastUpdateTimeRef.current >= throttleTime) {
-      setThrottledHtml(html);
+      setThrottledHtml(finalHtml);
       lastUpdateTimeRef.current = now;
     } else {
       // 如果距离上次更新时间不够，设置一个定时器在适当时间后更新
@@ -180,6 +214,7 @@ function Preview({
           isGenerating={isAiWorking}
           autoRefresh={autoRefresh}
           onToggleAutoRefresh={toggleAutoRefresh}
+          projectData={projectData}
         />
       </div>
       )}

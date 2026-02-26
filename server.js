@@ -15,6 +15,7 @@ dotenv.config();
 import { PROVIDERS } from "./utils/providers.js";
 import { TEMPLATES } from "./utils/templates.js";
 import { GeminiProvider } from "./utils/providers/gemini.js";
+import { FULLSTACK_TEMPLATES } from "./utils/promptTemplates/fullstack.js";
 
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
@@ -159,14 +160,42 @@ async function getChatHistory(sessionId) {
     }
 }
 
-const FULL_STACK_SYSTEM_PROMPT = `You are an expert full-stack developer.
-Always generate a complete, production-ready full-stack application based on the requested tech stack.
-The output MUST follow this specific format for each file:
+const PLAN_SYSTEM_PROMPT = `You are an expert software architect.
+Your goal is to create a detailed technical specification for a full-stack application based on the user's request.
+The output MUST be a Markdown document describing:
+1. Application overview
+2. Tech stack (frontend, backend, database)
+3. API endpoints
+4. Component structure
+5. Database schema
 
-# /path/to/file.ext
-\`\`\`extension
-file content here
-\`\`\`
+Do NOT generate any code, only the specification.`;
+
+const FULL_STACK_SYSTEM_PROMPT = `You are an expert full-stack developer.
+Always generate a complete, production-ready full-stack application based on the requested tech stack and provided specification.
+The output MUST be a JSON object with the following schema:
+
+{
+  "frontend": {
+    "files": {
+      "path/to/file.ext": "file content here",
+      ...
+    }
+  },
+  "backend": {
+    "files": {
+      "path/to/file.ext": "file content here",
+      ...
+    }
+  },
+  "rootFiles": {
+    "docker-compose.yml": "...",
+    "README.md": "...",
+    "prisma/schema.prisma": "...",
+    ...
+  },
+  "instructions": "Deployment and setup instructions"
+}
 
 You must include:
 1. /frontend (React/Next.js/etc. with Tailwind CSS)
@@ -311,6 +340,7 @@ app.post("/api/ask-ai", async (req, res) => {
         model: requestedModel,
         sessionId, 
         templateId,
+        phase, // 'plan' or 'generate'
         stack,
         maxTokens,
         temperature 
@@ -356,9 +386,14 @@ app.post("/api/ask-ai", async (req, res) => {
         }
 
         // Add system prompt
-        const systemPrompt = templateId && TEMPLATES[templateId]?.systemPrompt
-            ? `${TEMPLATES[templateId].systemPrompt}\n\n${FULL_STACK_SYSTEM_PROMPT}`
-            : FULL_STACK_SYSTEM_PROMPT;
+        let systemPrompt = FULL_STACK_SYSTEM_PROMPT;
+        if (phase === 'plan') {
+            systemPrompt = PLAN_SYSTEM_PROMPT;
+        } else if (templateId && TEMPLATES[templateId]?.systemPrompt) {
+            systemPrompt = `${TEMPLATES[templateId].systemPrompt}\n\n${FULL_STACK_SYSTEM_PROMPT}`;
+        } else if (templateId && FULLSTACK_TEMPLATES[templateId]) {
+            systemPrompt = `Using template: ${FULLSTACK_TEMPLATES[templateId].name}\n\n${FULL_STACK_SYSTEM_PROMPT}`;
+        }
 
         messages.unshift({
             role: "system",
@@ -401,6 +436,7 @@ app.post("/api/ask-ai", async (req, res) => {
                     const result = await gemini.generateResponse(modelToUse, messages, {
                         maxTokens: maxTokens || DEFAULT_MAX_TOKENS,
                         temperature: temperature !== undefined ? temperature : DEFAULT_TEMPERATURE,
+                        json: phase !== 'plan'
                     });
                     aiResponse = result.text;
                     tokensUsed = result.usage.total_tokens;
@@ -420,6 +456,7 @@ app.post("/api/ask-ai", async (req, res) => {
                             messages: messages,
                             max_tokens: maxTokens || DEFAULT_MAX_TOKENS,
                             temperature: temperature !== undefined ? temperature : DEFAULT_TEMPERATURE,
+                                ...(phase !== 'plan' && { response_format: { type: "json_object" } }),
                             ...(providerKey === 'openrouter' && { top_p: 1, frequency_penalty: 0, presence_penalty: 0 })
                         }),
                         timeout: 120000 // Increased timeout for full-stack generation

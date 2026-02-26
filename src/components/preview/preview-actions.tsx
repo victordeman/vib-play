@@ -19,6 +19,7 @@ interface PreviewActionsProps {
   autoRefresh?: boolean;
   onToggleAutoRefresh?: () => void;
   isGenerating?: boolean; // 保留类型定义，但在实现中不使用
+  projectData?: any;
 }
 
 const PreviewActions: FC<PreviewActionsProps> = ({ 
@@ -26,7 +27,8 @@ const PreviewActions: FC<PreviewActionsProps> = ({
   isDisabled, 
   onLoadTemplate,
   autoRefresh = false,
-  onToggleAutoRefresh
+  onToggleAutoRefresh,
+  projectData
 }) => {
   const { t } = useTranslation();
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
@@ -122,6 +124,15 @@ const PreviewActions: FC<PreviewActionsProps> = ({
     }
   };
 
+  const handleTestBackend = () => {
+    if (!projectData?.backend?.files) {
+        toast.info("No backend generated yet.");
+        return;
+    }
+    const routes = Object.keys(projectData.backend.files);
+    toast.info(`Generated backend has ${routes.length} files. Intercepting /api calls in preview.`);
+  };
+
   // 切换自动刷新状态
   const handleToggleAutoRefresh = () => {
     if (onToggleAutoRefresh) {
@@ -149,6 +160,19 @@ const PreviewActions: FC<PreviewActionsProps> = ({
             <span className="hidden sm:inline whitespace-nowrap">{t('preview.backToEditor')}</span>
           </button>
           
+          {/* 测试后端按钮 */}
+          {projectData && (
+            <button
+                className={`${buttonClass} bg-blue-700 border border-blue-600`}
+                onClick={handleTestBackend}
+                disabled={isDisabled}
+                title="Test Backend"
+            >
+                <FaList className="text-base lg:text-lg" />
+                <span className="hidden lg:inline">Test Backend</span>
+            </button>
+          )}
+
           {/* 保存模板按钮 */}
           <button
             className={`${buttonClass} bg-green-700 border border-green-600`}

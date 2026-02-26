@@ -3,6 +3,7 @@ import { toast } from "react-toastify";
 import { v4 as uuidv4 } from 'uuid';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
+import { FULLSTACK_TEMPLATES } from '../../../utils/promptTemplates/fullstack';
 
 // Icons (you can replace these with your preferred icon library)
 const SendIcon = () => (
@@ -71,6 +72,7 @@ interface AskAIProps {
   setView: (view: "editor" | "preview") => void;
   selectedTemplateId?: string;
   modelParams?: ModelParameters;
+  onProjectGenerated?: (project: any) => void;
 }
 
 // Provider options
@@ -110,8 +112,12 @@ const AskAI: React.FC<AskAIProps> = ({
   const [sessionId, setSessionId] = useState<string>("");
   const [selectedProvider, setSelectedProvider] = useState(modelParams?.provider || 'openai');
   const [selectedStack, setSelectedStack] = useState('React + Express');
+  const [selectedFullstackTemplate, setSelectedFullstackTemplate] = useState('todo');
+  const [currentPhase, setCurrentPhase] = useState<'plan' | 'generate'>('plan');
+  const [lastPlan, setLastPlan] = useState<string | null>(null);
   const [availableProviders, setAvailableProviders] = useState<string[]>([]);
   const [progress, setProgress] = useState(0);
+  const [generatedProject, setGeneratedProject] = useState<any>(null);
   
   // Refs
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -224,8 +230,13 @@ const AskAI: React.FC<AskAIProps> = ({
   }, [chatHistory, showHistory, scrollToBottom]);
 
   // Main AI call function
-  const callAi = async () => {
-    if (isAiWorking || !prompt.trim() || !sessionId) return;
+  const callAi = async (overridePhase?: 'plan' | 'generate') => {
+    const phase = overridePhase || currentPhase;
+    const finalPrompt = phase === 'generate' && lastPlan
+      ? `Specification:\n${lastPlan}\n\nUser Request: ${prompt.trim()}`
+      : prompt.trim();
+
+    if (isAiWorking || !finalPrompt || !sessionId) return;
 
     setIsAiWorking(true);
     abortControllerRef.current = new AbortController();
@@ -245,11 +256,12 @@ const AskAI: React.FC<AskAIProps> = ({
 
     try {
       const requestBody = {
-        prompt: currentPrompt,
+        prompt: phase === 'generate' ? finalPrompt : currentPrompt,
         provider: selectedProvider,
         sessionId: sessionId,
         stack: selectedStack,
-        ...(selectedTemplateId && { templateId: selectedTemplateId }),
+        phase: phase,
+        templateId: selectedFullstackTemplate,
         ...(modelParams?.model && { model: modelParams.model }),
         ...(modelParams?.maxTokens && { maxTokens: modelParams.maxTokens }),
         ...(modelParams?.temperature !== undefined && { temperature: modelParams.temperature })
@@ -288,11 +300,26 @@ const AskAI: React.FC<AskAIProps> = ({
 
       setChatHistory(prev => [...prev, aiMessage]);
 
-      // Update HTML if response contains HTML
-      if (data.response.includes('<!DOCTYPE html>') || data.response.includes('<html')) {
-        setHtml(data.response);
-        setView('preview');
-        onScrollToBottom();
+      if (phase === 'plan') {
+        setLastPlan(data.response);
+        setCurrentPhase('generate');
+        toast.info('Plan generated! Review it and click "Generate Code" to proceed.');
+      } else {
+        // Update HTML if response contains HTML (for legacy support)
+        if (data.response.includes('<!DOCTYPE html>') || data.response.includes('<html')) {
+          setHtml(data.response);
+          setView('preview');
+          onScrollToBottom();
+        }
+
+        try {
+            const project = JSON.parse(data.response);
+            setGeneratedProject(project);
+            if (onProjectGenerated) onProjectGenerated(project);
+            toast.success('Full-stack project generated successfully!');
+        } catch(e) {}
+
+        setCurrentPhase('plan'); // Reset for next iteration
       }
 
       toast.success(`Response generated using ${data.providerUsed || selectedProvider}`);
@@ -350,17 +377,44 @@ const AskAI: React.FC<AskAIProps> = ({
   // ZIP Export function
   const downloadAsZip = async (content: string) => {
     const zip = new JSZip();
-
-    // Pattern to match: # /path/to/file.ext followed by code block
-    const filePattern = /#\s+([^\n\r]+)[\r\n]+```[^\n\r]*[\r\n]+([\s\S]*?)```/g;
-    let match;
     let fileCount = 0;
 
-    while ((match = filePattern.exec(content)) !== null) {
-      const filePath = match[1].trim().replace(/^\//, ''); // remove leading slash
-      const fileContent = match[2].trim();
-      zip.file(filePath, fileContent);
-      fileCount++;
+    try {
+      const project = JSON.parse(content);
+
+      // Add frontend files
+      if (project.frontend?.files) {
+        Object.entries(project.frontend.files).forEach(([path, content]) => {
+          zip.file(`frontend/${path.replace(/^\//, '')}`, content as string);
+          fileCount++;
+        });
+      }
+
+      // Add backend files
+      if (project.backend?.files) {
+        Object.entries(project.backend.files).forEach(([path, content]) => {
+          zip.file(`backend/${path.replace(/^\//, '')}`, content as string);
+          fileCount++;
+        });
+      }
+
+      // Add root files
+      if (project.rootFiles) {
+        Object.entries(project.rootFiles).forEach(([path, content]) => {
+          zip.file(path.replace(/^\//, ''), content as string);
+          fileCount++;
+        });
+      }
+    } catch (e) {
+      // Fallback to regex if not JSON
+      const filePattern = /#\s+([^\n\r]+)[\r\n]+```[^\n\r]*[\r\n]+([\s\S]*?)```/g;
+      let match;
+      while ((match = filePattern.exec(content)) !== null) {
+        const filePath = match[1].trim().replace(/^\//, '');
+        const fileContent = match[2].trim();
+        zip.file(filePath, fileContent);
+        fileCount++;
+      }
     }
 
     if (fileCount === 0) {
@@ -383,7 +437,14 @@ const AskAI: React.FC<AskAIProps> = ({
     const { content, role } = message;
 
     if (role === 'assistant') {
-      const hasProjectFiles = content.includes('# /') && content.includes('```');
+      let isJson = false;
+      let projectData: any = null;
+      try {
+        projectData = JSON.parse(content);
+        isJson = true;
+      } catch (e) {}
+
+      const hasProjectFiles = isJson || (content.includes('# /') && content.includes('```'));
       const isHtml = content.includes('<!DOCTYPE html>') || content.includes('<html');
 
       if (isHtml) {
@@ -410,9 +471,22 @@ const AskAI: React.FC<AskAIProps> = ({
                 Download as Full Project ZIP
               </button>
             </div>
-            <div className="text-xs text-gray-500 bg-gray-100 p-2 rounded max-h-40 overflow-y-auto whitespace-pre-wrap font-mono">
-              {content.substring(0, 500)}...
-            </div>
+            {isJson ? (
+              <div className="space-y-2">
+                <div className="text-xs text-blue-600 bg-blue-50 p-2 rounded">
+                  Structure: {Object.keys(projectData.frontend?.files || {}).length} frontend files, {Object.keys(projectData.backend?.files || {}).length} backend files.
+                </div>
+                {projectData.instructions && (
+                  <div className="text-xs text-gray-700 bg-gray-100 p-2 rounded whitespace-pre-wrap italic">
+                    {projectData.instructions}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-xs text-gray-500 bg-gray-100 p-2 rounded max-h-40 overflow-y-auto whitespace-pre-wrap font-mono">
+                {content.substring(0, 500)}...
+              </div>
+            )}
           </div>
         );
       }
@@ -459,6 +533,20 @@ const AskAI: React.FC<AskAIProps> = ({
                 {STACK_OPTIONS.map(option => (
                   <option key={option.value} value={option.value}>
                     {option.label}
+                  </option>
+                ))}
+              </select>
+
+              <label className="text-sm text-gray-600 ml-4">Template:</label>
+              <select
+                value={selectedFullstackTemplate}
+                onChange={(e) => setSelectedFullstackTemplate(e.target.value)}
+                disabled={isAiWorking}
+                className="text-sm px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {Object.entries(FULLSTACK_TEMPLATES).map(([key, template]) => (
+                  <option key={key} value={key}>
+                    {template.name}
                   </option>
                 ))}
               </select>
@@ -591,12 +679,14 @@ const AskAI: React.FC<AskAIProps> = ({
               </button>
             ) : (
               <button
-                onClick={callAi}
+                onClick={() => callAi()}
                 disabled={!prompt.trim() || !sessionId || availableProviders.length === 0}
-                className="p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                title="Send message"
+                className={`p-3 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                    currentPhase === 'plan' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-green-600 hover:bg-green-700'
+                }`}
+                title={currentPhase === 'plan' ? 'Generate Plan' : 'Generate Code'}
               >
-                <SendIcon />
+                {currentPhase === 'plan' ? <SendIcon /> : 'Generate Code'}
               </button>
             )}
           </div>
