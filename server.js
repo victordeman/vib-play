@@ -7,6 +7,8 @@ import bodyParser from "body-parser";
 import fetch from "node-fetch";
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { spawn } from "child_process";
+import fs from "fs";
 
 // Load environment variables first
 dotenv.config();
@@ -14,7 +16,7 @@ dotenv.config();
 // Import utilities
 import { PROVIDERS } from "./utils/providers.js";
 import { TEMPLATES } from "./utils/templates.js";
-import { GeminiProvider } from "./utils/providers/gemini.js";
+import { GeminiProvider } from "./utils/providers/gemini.ts";
 
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
@@ -351,7 +353,8 @@ app.post("/api/ask-ai", async (req, res) => {
             const history = await getChatHistory(sessionId);
             messages = history.map(msg => ({
                 role: msg.role,
-                content: msg.content
+                content: msg.content,
+                ...(msg.name && { name: msg.name }) // For function responses
             }));
         }
 
@@ -401,9 +404,21 @@ app.post("/api/ask-ai", async (req, res) => {
                     const result = await gemini.generateResponse(modelToUse, messages, {
                         maxTokens: maxTokens || DEFAULT_MAX_TOKENS,
                         temperature: temperature !== undefined ? temperature : DEFAULT_TEMPERATURE,
+                        ...(req.body.tools && { tools: req.body.tools })
                     });
                     aiResponse = result.text;
                     tokensUsed = result.usage.total_tokens;
+
+                    if (result.toolCalls && result.toolCalls.length > 0) {
+                        return res.json({
+                            ok: true,
+                            response: aiResponse,
+                            toolCalls: result.toolCalls,
+                            modelUsed: modelToUse,
+                            providerUsed: providerConfig.name,
+                            tokensUsed: tokensUsed
+                        });
+                    }
                 } else {
                     const response = await fetch(`${providerConfig.baseUrl}/chat/completions`, {
                         method: "POST",
@@ -495,6 +510,87 @@ app.get("/api/templates", (req, res) => {
     res.json({
         ok: true,
         templates
+    });
+});
+
+// Agent execution endpoint (sandboxed via Docker)
+app.post("/api/agent/execute", async (req, res) => {
+    const { command, sessionId } = req.body;
+
+    if (!command) {
+        return res.status(400).json({ ok: false, message: "No command provided" });
+    }
+
+    // Sanitize sessionId to prevent path traversal
+    const safeSessionId = sessionId ? sessionId.replace(/[^a-zA-Z0-9_-]/g, '') : "default";
+
+    // Command validation: strict whitelist + no shell operators
+    const whitelist = ["ls", "npm install", "npm run build", "npm run dev", "cat", "mkdir", "touch"];
+    const isWhitelisted = whitelist.some(cmd => command.startsWith(cmd));
+    const hasOperators = /[;&|><$`\\]/.test(command);
+
+    if (!isWhitelisted || hasOperators) {
+        return res.status(403).json({
+            ok: false,
+            message: "Command not allowed or contains forbidden characters"
+        });
+    }
+
+    // Ensure session directory exists
+    const sessionDir = path.join(__dirname, "temp", safeSessionId);
+    if (!fs.existsSync(sessionDir)) {
+        fs.mkdirSync(sessionDir, { recursive: true });
+    }
+
+    // Prepare docker command using spawn for better security
+    // We use node:18-alpine for a lightweight sandbox
+    const dockerArgs = [
+        "run", "--rm",
+        "-v", `${sessionDir}:/app`,
+        "-w", "/app",
+        "node:18-alpine",
+        "sh", "-c", command
+    ];
+
+    console.log(`Executing in sandbox [${safeSessionId}]: ${command}`);
+
+    const child = spawn("docker", dockerArgs, { timeout: 60000 });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data) => {
+        stdout += data.toString();
+    });
+
+    child.stderr.on("data", (data) => {
+        stderr += data.toString();
+    });
+
+    child.on("close", (code) => {
+        if (code !== 0) {
+            console.error(`Execution failed with code ${code}`);
+            return res.json({
+                ok: false,
+                output: stdout,
+                error: stderr || `Process exited with code ${code}`,
+                exitCode: code
+            });
+        }
+        res.json({
+            ok: true,
+            output: stdout,
+            error: stderr,
+            exitCode: 0
+        });
+    });
+
+    child.on("error", (err) => {
+        console.error(`Failed to start process: ${err.message}`);
+        res.status(500).json({
+            ok: false,
+            message: `Failed to start sandbox: ${err.message}`
+        });
     });
 });
 
