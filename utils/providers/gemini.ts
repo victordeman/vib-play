@@ -1,5 +1,13 @@
 import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
 
+export interface GeminiResponse {
+  text: string;
+  toolCalls?: any[];
+  usage: {
+    total_tokens: number;
+  };
+}
+
 export class GeminiProvider {
   private genAI: GoogleGenerativeAI;
 
@@ -19,10 +27,23 @@ export class GeminiProvider {
     const systemInstruction = messages.find(m => m.role === 'system')?.content;
     const chatMessages = messages
       .filter(m => m.role !== 'system')
-      .map(m => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
-      }));
+      .map(m => {
+        if (m.role === 'function') {
+          return {
+            role: 'function',
+            parts: [{ 
+              functionResponse: { 
+                name: m.name, 
+                response: m.content 
+              } 
+            }],
+          };
+        }
+        return {
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: m.content }],
+        };
+      });
 
     const generationConfig = {
       temperature: options.temperature ?? 0.7,
@@ -53,16 +74,28 @@ export class GeminiProvider {
     const chatSession = model.startChat({
       generationConfig,
       safetySettings,
-      history: chatMessages.slice(0, -1),
-      ...(systemInstruction && { systemInstruction: { role: 'system', parts: [{ text: systemInstruction }] } })
+      history: chatMessages.slice(0, -1).map(m => {
+        if (m.role === 'function') {
+          // StartChat history for Gemini expects specific role names: 'user' or 'model'
+          // For function calls/responses, we need to adapt
+          return { role: 'user', parts: m.parts };
+        }
+        return m;
+      }),
+      ...(systemInstruction && { systemInstruction: { role: 'system', parts: [{ text: systemInstruction }] } }),
+      ...(options.tools && { tools: options.tools })
     });
 
-    const lastMessage = chatMessages[chatMessages.length - 1].parts[0].text;
+    const lastMessagePart = chatMessages[chatMessages.length - 1].parts[0];
+    const lastMessage = (lastMessagePart as any).text || lastMessagePart;
     const result = await chatSession.sendMessage(lastMessage);
     const response = result.response;
-    
+    const candidates = response.candidates;
+    const call = candidates?.[0]?.content?.parts?.find(p => p.functionCall);
+
     return {
-      text: response.text(),
+      text: response.text ? response.text() : "",
+      toolCalls: call ? [call.functionCall] : [],
       usage: {
         total_tokens: response.usageMetadata?.totalTokenCount || 0
       }
