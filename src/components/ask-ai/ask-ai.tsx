@@ -3,6 +3,7 @@ import { toast } from "react-toastify";
 import { v4 as uuidv4 } from 'uuid';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
+import TerminalOutput from './terminal-output';
 
 // Icons (you can replace these with your preferred icon library)
 const SendIcon = () => (
@@ -42,6 +43,12 @@ const DownloadIcon = () => (
   </svg>
 );
 
+const AgentIcon = () => (
+  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+  </svg>
+);
+
 // Interfaces
 interface ChatMessage {
   id: string;
@@ -63,6 +70,7 @@ interface ModelParameters {
 }
 
 interface AskAIProps {
+  agentTurnLimit?: number;
   html: string;
   setHtml: (html: string) => void;
   onScrollToBottom: () => void;
@@ -94,6 +102,7 @@ const STACK_OPTIONS = [
 ];
 
 const AskAI: React.FC<AskAIProps> = ({
+  agentTurnLimit = 5,
   html,
   setHtml,
   onScrollToBottom,
@@ -112,6 +121,16 @@ const AskAI: React.FC<AskAIProps> = ({
   const [selectedStack, setSelectedStack] = useState('React + Express');
   const [availableProviders, setAvailableProviders] = useState<string[]>([]);
   const [progress, setProgress] = useState(0);
+  const [isAgentMode, setIsAgentMode] = useState(false);
+  const [terminalOutput, setTerminalOutput] = useState<{
+    command: string;
+    stdout: string;
+    stderr?: string;
+    exitCode?: number;
+    timestamp: number;
+  }[]>([]);
+  const [showTerminal, setShowTerminal] = useState(false);
+  const [agentTurns, setAgentTurns] = useState(0);
   
   // Refs
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -223,9 +242,52 @@ const AskAI: React.FC<AskAIProps> = ({
     }
   }, [chatHistory, showHistory, scrollToBottom]);
 
+  // Execute agent command
+  const executeCommand = async (command: string) => {
+    setTerminalOutput(prev => [...prev, {
+      command,
+      stdout: "Executing...",
+      timestamp: Date.now()
+    }]);
+    setShowTerminal(true);
+
+    try {
+      const response = await fetch('/api/agent/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command, sessionId })
+      });
+      const data = await response.json();
+      
+      setTerminalOutput(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          command,
+          stdout: data.output,
+          stderr: data.error,
+          exitCode: data.exitCode,
+          timestamp: Date.now()
+        };
+        return updated;
+      });
+
+      return data;
+    } catch (error) {
+      console.error("Command execution failed:", error);
+      toast.error("Agent failed to execute command");
+    }
+  };
+
   // Main AI call function
-  const callAi = async () => {
+  const callAi = async (isAgentRecursive = false) => {
     if (isAiWorking || !prompt.trim() || !sessionId) return;
+
+    if (!isAgentRecursive) {
+      setAgentTurns(0);
+    } else if (agentTurns >= agentTurnLimit) {
+      toast.warn(`Agent reached turn limit (${agentTurnLimit}). Stopping loop.`);
+      return;
+    }
 
     setIsAiWorking(true);
     abortControllerRef.current = new AbortController();
@@ -249,6 +311,21 @@ const AskAI: React.FC<AskAIProps> = ({
         provider: selectedProvider,
         sessionId: sessionId,
         stack: selectedStack,
+        ...(isAgentMode && selectedProvider === 'gemini' && {
+          tools: [{
+            function_declarations: [{
+              name: "execute_command",
+              description: "Execute a shell command in a sandboxed environment",
+              parameters: {
+                type: "object",
+                properties: {
+                  command: { type: "string", description: "The command to execute" }
+                },
+                required: ["command"]
+              }
+            }]
+          }]
+        }),
         ...(selectedTemplateId && { templateId: selectedTemplateId }),
         ...(modelParams?.model && { model: modelParams.model }),
         ...(modelParams?.maxTokens && { maxTokens: modelParams.maxTokens }),
@@ -271,8 +348,43 @@ const AskAI: React.FC<AskAIProps> = ({
 
       const data = await response.json();
       
-      if (!data.ok || !data.response) {
+      if (!data.ok) {
         throw new Error(data.message || 'Invalid response from server');
+      }
+
+      // Handle tool calls if any
+      if (data.toolCalls && data.toolCalls.length > 0) {
+        for (const call of data.toolCalls) {
+          if (call.name === 'execute_command') {
+            const toolResult = await executeCommand(call.args.command);
+            toast.info(`Agent executed: ${call.args.command}`);
+
+            // Add function response to history and call AI again
+            const functionMessage: ChatMessage = {
+              id: uuidv4(),
+              session_id: sessionId,
+              role: 'system', // Map to function role on server
+              content: JSON.stringify(toolResult),
+              timestamp: Date.now()
+            };
+            // Note: In a real implementation, we'd need a specific 'function' role in the ChatMessage interface
+            // or handle it specifically in the next request.
+            // For now, we'll append it and trigger another call if needed.
+            setChatHistory(prev => [...prev, functionMessage]);
+            
+            // Re-call AI with the results (recursive agent loop)
+            setAgentTurns(prev => prev + 1);
+            setTimeout(() => {
+              setPrompt("The command was executed. Output: " + JSON.stringify(toolResult.output) + ". Please continue.");
+              callAi(true);
+            }, 1000);
+          }
+        }
+      }
+
+      if (!data.response) {
+        setIsAiWorking(false);
+        return;
       }
 
       // Add AI response to chat history
@@ -398,18 +510,66 @@ const AskAI: React.FC<AskAIProps> = ({
       }
 
       if (hasProjectFiles) {
+        // Extract project name or use timestamp
+        const projectName = `deepsite-project-${message.timestamp}`;
+        const repoUrl = window.location.origin.includes('localhost') 
+          ? 'https://github.com/MadScientist85/Mydeepsite2.0' 
+          : window.location.href; // Try to use current URL if deployed
+
+        // Deployment URLs
+        const vercelDeployUrl = `https://vercel.com/new/clone?repository-url=${encodeURIComponent(repoUrl)}&project-name=${projectName}`;
+        const netlifyDeployUrl = `https://app.netlify.com/start/deploy?repository=${encodeURIComponent(repoUrl)}`;
+        const railwayDeployUrl = `https://railway.app/new/template?template=${encodeURIComponent(repoUrl)}`;
+
         return (
           <div>
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm font-medium text-gray-600">Full Project Generated</span>
-              <button
-                onClick={() => downloadAsZip(content)}
-                className="flex items-center px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors"
-              >
-                <DownloadIcon />
-                Download as Full Project ZIP
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => downloadAsZip(content)}
+                  className="flex items-center px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors"
+                  title="Download ZIP"
+                >
+                  <DownloadIcon />
+                  ZIP
+                </button>
+              </div>
             </div>
+
+            <div className="mb-3">
+              <div className="text-[10px] text-gray-400 mb-1.5 uppercase tracking-wider font-bold">One-Click Deploy (Generator Template)</div>
+              <div className="flex flex-wrap gap-2">
+                <a 
+                  href={vercelDeployUrl} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center px-2 py-1 text-[10px] bg-black text-white rounded hover:opacity-80 transition-opacity"
+                >
+                  Deploy to Vercel
+                </a>
+                <a 
+                  href={netlifyDeployUrl} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center px-2 py-1 text-[10px] bg-[#00AD9F] text-white rounded hover:opacity-80 transition-opacity"
+                >
+                  Deploy to Netlify
+                </a>
+                <a 
+                  href={railwayDeployUrl} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center px-2 py-1 text-[10px] bg-[#0B0D0E] text-white rounded hover:opacity-80 transition-opacity"
+                >
+                  Deploy to Railway
+                </a>
+              </div>
+              <p className="mt-1.5 text-[9px] text-gray-500 leading-tight">
+                * Links clone the DeepSite template. To deploy your specific generated code, download the ZIP and push it to your own repository.
+              </p>
+            </div>
+
             <div className="text-xs text-gray-500 bg-gray-100 p-2 rounded max-h-40 overflow-y-auto whitespace-pre-wrap font-mono">
               {content.substring(0, 500)}...
             </div>
@@ -497,6 +657,21 @@ const AskAI: React.FC<AskAIProps> = ({
           >
             <PreviewIcon />
           </button>
+
+          {selectedProvider === 'gemini' && (
+            <button
+              onClick={() => setIsAgentMode(!isAgentMode)}
+              disabled={isAiWorking}
+              className={`p-2 rounded-full transition-colors ${
+                isAgentMode 
+                  ? 'text-purple-600 bg-purple-50' 
+                  : 'text-gray-600 hover:text-purple-600 hover:bg-purple-50'
+              }`}
+              title="Toggle Agentic Mode (Vibe Agent)"
+            >
+              <AgentIcon />
+            </button>
+          )}
         </div>
       </div>
 
@@ -604,16 +779,30 @@ const AskAI: React.FC<AskAIProps> = ({
 
         {/* Status indicators */}
         <div className="flex items-center justify-between mt-2 text-xs text-gray-500">
-          <div>
-            {availableProviders.length === 0 
-              ? 'No AI providers configured' 
-              : `${availableProviders.length} provider(s) available`}
+          <div className="flex items-center space-x-4">
+            <span>
+              {availableProviders.length === 0 
+                ? 'No AI providers configured' 
+                : `${availableProviders.length} provider(s) available`}
+            </span>
+            {isAgentMode && (
+              <span className="flex items-center text-purple-600 font-medium">
+                <span className="w-2 h-2 bg-purple-600 rounded-full animate-pulse mr-1.5"></span>
+                Vibe Agent Active
+              </span>
+            )}
           </div>
           <div>
             Press Enter to send • Shift+Enter for new line
           </div>
         </div>
       </div>
+
+      <TerminalOutput 
+        output={terminalOutput} 
+        isVisible={showTerminal} 
+        onClose={() => setShowTerminal(false)} 
+      />
     </div>
   );
 };
