@@ -28,8 +28,33 @@ AI-powered website generator with multi-provider support, featuring OpenAI, Open
 - **Chat Memory**: Persistent conversations using Supabase
 - **Real-time Generation**: Live HTML preview as AI generates content
 - **Template System**: Pre-built templates for different website types
+- **Agentic Mode (Vibe Agent)**: Real-time command execution in a sandboxed Docker environment
+- **One-Click Deploy**: Instant deployment links for Vercel, Netlify, and Railway
 - **Rate Limiting**: IP-based request limiting for production use
 - **Modern Stack**: React, TypeScript, Express.js, Supabase
+
+## 🌟 New Features
+
+### 🤖 Vibe Agent (Agentic Mode)
+DeepSite 2.0 now features an **Agentic Mode** powered by Gemini. When enabled, the AI can:
+- Run `npm install` to set up dependencies
+- Execute `npm run build` to verify the project
+- Perform directory operations and file management
+- Provide real-time feedback via an integrated **Vibe Terminal**
+
+### 🚀 One-Click Deployment
+After generating a full-stack project, you can instantly deploy it to your favorite cloud provider:
+- **Vercel**: Optimized for Next.js and frontend frameworks
+- **Netlify**: Perfect for static sites and serverless functions
+- **Railway**: Best for full-stack apps with databases
+
+## 🖼️ Example Gallery
+
+| Project | Description | Stack | Preview |
+|---------|-------------|-------|---------|
+| [SaaS Landing](https://deepsite-demo.vercel.app/saas) | Modern SaaS landing page | Next.js + Tailwind | [View](https://deepsite-demo.vercel.app/saas) |
+| [E-commerce](https://deepsite-demo.vercel.app/shop) | Full-stack shop with cart | React + Node.js | [View](https://deepsite-demo.vercel.app/shop) |
+| [Portfolio](https://deepsite-demo.vercel.app/portfolio) | Minimalist dev portfolio | SvelteKit | [View](https://deepsite-demo.vercel.app/portfolio) |
 
 ## Quick Start
 
